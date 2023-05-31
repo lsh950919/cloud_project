@@ -1,50 +1,89 @@
+import random
 import torch
 import torch.nn as nn
+from torch.utils.data import Dataset
 import pandas as pd
 from glob import glob
 from natsort import natsorted
-from torch.utils.data import Dataset
+from sklearn.preprocessing import MinMaxScaler
 
-COLUMN_NAMES = [content.split(',')[2] for content in open('data/schema.csv').readlines() if content.startswith('vm_cpu_readings')]
+random.seed(42)
+VM_COLUMNS = [content.split(',')[2] for content in open('data/schema.csv').readlines() if content.startswith('vmtable')]
+CPU_COLUMNS = [content.split(',')[2] for content in open('data/schema.csv').readlines() if content.startswith('vm_cpu_readings')]
+scaler = MinMaxScaler((0.1, 1))
 
 class TimeSeriesDataset(Dataset):
-    def __init__(self, input_window_size, output_window_size, stride = 10, file_count:int = 1):
+    def __init__(self, input_window_size, output_window_size, type = 'train', stride = 10, file_count:int = 1, hours:int = 6, scale = False):
+        '''
+        Args:
+            input_window_size (int): number of cpu readings to be used for forecasting
+            output_window_size (int): length of forecasting output
+            type (str, optional): train, val, or test (default: train)
+            stride (int, optional): number of strides in time for each prediction step (default: 10)
+            file_count (int, optional): number of cpu files to be used (default: 1)
+            hours (int, optional): minimum number of hours vm was used (default: 6)
+        '''
         self.input_window_size = input_window_size
         self.output_window_size = output_window_size
         self.stride = stride
         
         self.vm_table = pd.read_csv('data/vmtable.csv')
+        self.vm_table.columns = VM_COLUMNS
         self.cpu_paths = natsorted(glob('data/*125.csv'))[:file_count]
         assert len(self.cpu_paths) == file_count
 
+        # Encoder Input
         # TODO: come up with a way to filter out vm ids if they are only created relatively recently compared to the last timestamp
-        
+        self.vm_table = self.vm_table[(((self.vm_table['timestamp vm deleted'] - self.vm_table['timestamp vm created']) / 300) >= 60*hours)]
+        self.vm_table = self.vm_table[['vm id', 'subscription id', 'deployment id', 'vm category', 'vm virtual core count', 'vm memory (gb)']].reset_index()
 
         # filter out vm table using the last timestamp of last file
-        valid_ids = None
+        self.valid_ids = self.vm_table['vm id'].tolist()
 
         # create index dict of one hot vectors for vm and subscription ids
-        self.vm_vec = {vm_id: i for i, vm_id in enumerate(self.vm_table['vm id'].values())}
-        self.sub_vec = {sub_id: i for i, sub_id in enumerate(self.vm_table['subscription id'].values())}
-        self.vm_eye = torch.eye(len(self.vm_vec))
-        self.sub_eye = torch.eye(len(self.sub_vec))
-        
+        self.vm_ind = {vm_id: i for i, vm_id in enumerate(self.vm_table['vm id'].unique())}
+        self.sub_ind = {sub_id: i for i, sub_id in enumerate(self.vm_table['subscription id'].unique())}
+        self.dep_ind = {dep_id: i for i, dep_id in enumerate(self.vm_table['deployment id'].unique())}
+        self.cat_ind = {cat_name: i for i, cat_name in enumerate(self.vm_table['vm category'].unique())}
+
+        self.vm_table['vm id'] = self.vm_table['vm id'].map(self.vm_ind)
+        self.vm_table['subscription id'] = self.vm_table['subscription id'].map(self.sub_ind)
+        self.vm_table['deployment id'] = self.vm_table['deployment id'].map(self.dep_ind)
+        self.vm_table['vm category'] = self.vm_table['vm category'].map(self.cat_ind)
+
+        # scale cores and ram
+        if scale:
+            self.vm_table['vm virtual core count'] = scaler.fit_transform(self.vm_table[['vm virtual core count']])
+            self.vm_table['vm memory (gb)'] = scaler.fit_transform(self.vm_table[['vm memory (gb)']])
+        else:
+            self.core_ind = {core_count: i for i, core_count in enumerate(self.vm_table['vm virtual core count'].unique())}
+            self.ram_ind = {ram: i for i, ram in enumerate(self.vm_table['vm memory (gb)'].unique())}
+            self.vm_table['vm virtual core count'] = self.vm_table['vm virtual core count'].map(self.core_ind)
+            self.vm_table['vm memory (gb)'] = self.vm_table['vm memory (gb)'].map(self.ram_ind)
+            
+        # Decoder Input
         # concatenate all cpu readings files, sort by vm id first then timestamp
-        self.cpu_concat = pd.concat([self.filter_reading(path, valid_ids) for path in self.cpu_paths], axis = 0).sort_values(['vm id', 'timestamp']) # maybe find a faster way to sort
+        cpu_concat = pd.concat([self.filter_reading(path, self.valid_ids) for path in self.cpu_paths], axis = 0).sort_values(['vm id', 'timestamp']) # maybe find a faster way to sort
+        self.cpu_by_time = cpu_concat.pivot_table(index = 'vm id', columns = 'timestamp', values = 'avg cpu').fillna(0)
 
-        # TODO: 
+        # 
 
-    def filter_reading(path, valid_ids):
+    def filter_reading(self, path, valid_ids):
         df = pd.read_csv(path)
-        df.columns = COLUMN_NAMES
+        df.columns = CPU_COLUMNS
         filtered = df[df['vm id'].isin(valid_ids)]
         return filtered
-
+    
+    def unique_count(self):
+        return len(self.vm_ind), len(self.sub_ind), len(self.dep_ind)
+    
     def __len__(self):
-        return len(self.data)
+        return len(self.vm_table)
     
     def __getitem__(self, index):
-        pass
+        # vm ind, sub ind, dep ind
+        vm_id = self.vm_table.loc[index, 'vm id']
+        return torch.from_numpy(self.vm_table.loc[index].to_numpy()), 
         
         
 

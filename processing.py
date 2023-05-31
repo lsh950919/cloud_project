@@ -21,7 +21,6 @@ def process_cpu_reading(path_list, file_count, long_vm_list):
         df = df.groupby(['timestamp', 'vm id']).mean().reset_index()
         df_filtered = df[df['vm id'].isin(long_vm_list.keys())]
         df_list.append(df_list)
-
     return df_list
 
 # return one hot vector of vm id

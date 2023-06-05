@@ -44,14 +44,19 @@ def train_step(data_loader, model, optimizer, scheduler, mode, scaler, cpu_loss,
             loss = f"{train_loss/ (i+1):.4f}",
             lr = f"{optimizer.param_groups[0]['lr']}"
         )
+        
         batch_bar.update()
     
     batch_bar.close()
     train_loss /= len(data_loader)
     return train_loss
 
-def evaluate():
-    pass
+def evaluate(data_loader, model, mode):
+    model.eval()
+    loss = 0
+    batch_bar = tqdm(total=len(data_loader), dynamic_ncols=True, leave=False, position=0, desc='Val')
+    
+    for i, enumerate in enumerate(data_loader):
 
 
 if __name__ == "__main__":
@@ -82,6 +87,9 @@ if __name__ == "__main__":
     scaler = GradScaler()
 
     for epoch in range(args.epochs):
+    
+        epoch_loss = train_step(train_loader, model, optimizer, scheduler, args.mode, scaler, cpu_loss, stability_loss, forecast_loss)
         
-        output = train_step(train_loader, model, optimizer, scheduler, args.mode, scaler, cpu_loss, stability_loss, forecast_loss)
+        eval_loss = evaluate(val_loader, model, args.mode)
 
+        scheduler.step()

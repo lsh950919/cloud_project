@@ -251,11 +251,12 @@ class ForecastDecoder(nn.Module):
                                             ])
         self.dropout = nn.Dropout(dropout_rate)
 
-    def forward(self, cpu_vec = None):
+    def forward(self, cpu_vec, enc_vec = None):
         dec_vec = self.dropout(self.positional_encoding_dec(self.decoder_input(cpu_vec)))
-    
+        enc_vec = dec_vec.clone() if enc_vec is None else enc_vec
+        
         for dec_layer in self.decoder_layers:
-            dec_vec = dec_layer(dec_vec, dec_vec)
+            dec_vec = dec_layer(dec_vec, enc_vec)
 
         dec_output = self.forecast_layer(dec_vec)
 

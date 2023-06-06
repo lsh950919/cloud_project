@@ -6,7 +6,7 @@ from typing import Literal
 class MultiHeadAttention(nn.Module):
     def __init__(self, model_dim, hidden_dim = 64, num_heads = 4):
         super(MultiHeadAttention, self).__init__()
-        assert self.hidden_dim % num_heads == 0, 'Projection dimension must be divisible by the number of heads'
+        assert hidden_dim % num_heads == 0, 'Projection dimension must be divisible by the number of heads'
         # self.input_dim = actor_emb_dim + critic_emb_dim
         self.model_dim = model_dim
         self.hidden_dim = hidden_dim
@@ -100,7 +100,7 @@ class EncoderLayer(nn.Module):
         self.layer_norm2 = nn.LayerNorm(model_dim)
         self.dropout = nn.Dropout(dropout_rate)
 
-    def forward(self, x, mask):
+    def forward(self, x, mask = None):
         attn_output = self.attn(x, mask = mask)
         x = self.layer_norm1(x + self.dropout(attn_output)) # residual + dropout
         ff_output = self.ff(attn_output)
@@ -119,7 +119,7 @@ class DecoderLayer(nn.Module):
         self.layer_norm3 = nn.LayerNorm(model_dim)
         self.dropout = nn.Dropout(dropout_rate)
 
-    def forward(self, x, enc_output, src_mask, tgt_mask):
+    def forward(self, x, enc_output, src_mask = None, tgt_mask = None):
         attn_output = self.self_attn(x, mask = tgt_mask)
         x = self.layer_norm1(x + self.dropout(attn_output)) # residual + dropout
         attn_output = self.cross_attn(x, enc_output, src_mask)
@@ -132,9 +132,11 @@ class DecoderLayer(nn.Module):
 PossibleMode = Literal['encoder', 'decoder', 'both']
 # TODO: add masking for decoder
 class TimeSeriesTransformer(nn.Module):
-    def __init__(self, id_unique, sub_unique, dep_unique, dec_input, hidden_dim, input_len = 12, n_heads = 4, n_layers = 8, dropout_rate = 0.15):
+    def __init__(self, batch_size, id_unique, sub_unique, dep_unique, dec_input, hidden_dim, input_len = 12, n_heads = 4, n_layers = 8, dropout_rate = 0.15):
         super().__init__()
         # embedding
+        self.batch_size = batch_size
+
         self.id_emb = nn.Embedding(id_unique, hidden_dim)
         self.sub_emb = nn.Embedding(sub_unique, hidden_dim)
         self.dep_emb = nn.Embedding(dep_unique, hidden_dim)
@@ -144,38 +146,38 @@ class TimeSeriesTransformer(nn.Module):
 
         self.encoder_input = nn.Linear(hidden_dim, hidden_dim)
         self.decoder_input = nn.Linear(dec_input, hidden_dim)
-        self.positional_encoding_enc = PositionalEncoding(hidden_dim, hidden_dim)
-        self.positional_encoding_dec = PositionalEncoding(dec_input, hidden_dim)
+        self.positional_encoding_enc = PositionalEncoding(batch_size, hidden_dim)
+        self.positional_encoding_dec = PositionalEncoding(batch_size, hidden_dim)
 
         self.encoder_layers = nn.ModuleList([EncoderLayer(hidden_dim, n_heads, hidden_dim, dropout_rate) for _ in range(n_layers)])
         self.decoder_layers = nn.ModuleList([DecoderLayer(hidden_dim, n_heads, hidden_dim, dropout_rate) for _ in range(n_layers)])
 
-        self.cpu_layer = nn.ModuleList([
-                                        nn.Linear(hidden_dim, hidden_dim),
-                                        nn.Dropout(0.1),
-                                        nn.Linear(hidden_dim, 4),
-                                        ])
-        self.stability_layer = nn.ModuleList([
+        self.cpu_layer = nn.Sequential(
+                                    nn.Linear(hidden_dim, hidden_dim),
+                                    nn.Dropout(dropout_rate),
+                                    nn.Linear(hidden_dim, 4),
+                                    )
+        self.stability_layer = nn.Sequential(
                                             nn.Linear(hidden_dim, hidden_dim),
-                                            nn.Dropout(0.1),
+                                            nn.Dropout(dropout_rate),
                                             nn.Linear(hidden_dim, 2)
-                                            ])
-        
-        self.forecast_layer = nn.ModuleList([
+                                            )
+        self.forecast_layer = nn.Sequential(
                                             nn.Linear(hidden_dim, hidden_dim),
-                                            nn.Dropout(0.1),
+                                            nn.Dropout(dropout_rate),
                                             nn.Linear(hidden_dim, 1)
-                                            ])
+                                            )
         self.dropout = nn.Dropout(dropout_rate)
 
     def forward(self, vm_vec, cpu_vec):
-        assert len(vm_vec) == 6
-        vm_id, sub_id, dep_id, vm_cat, num_cores, ram = vm_vec
-        vm_vec = torch.cat([self.id_emb(vm_id), self.sub_emb(sub_id), self.dep_emb(dep_id),
-                            vm_cat, num_cores, ram], dim = 0)
-        
+        assert vm_vec.shape[-1] == 6, len(vm_vec)
+        import ipdb; ipdb.set_trace()
+
+        vm_vec = torch.stack([self.id_emb(vm_vec[:, 0]), self.sub_emb(vm_vec[:, 1]), self.dep_emb(vm_vec[:, 2]),
+                              self.cat_emb(vm_vec[:, 3]), self.core_emb(vm_vec[:, 4]), self.ram_emb(vm_vec[:, 5])], dim = 1)
         enc_vec = self.dropout(self.positional_encoding_enc(self.encoder_input(vm_vec)))
-        dec_vec = self.dropout(self.positional_encoding_dec(self.decoder_input(cpu_vec)))
+        
+        dec_vec = self.dropout(self.positional_encoding_dec(self.decoder_input(cpu_vec.type(torch.float32))))
     
         for enc_layer in self.encoder_layers:
             enc_vec = enc_layer(enc_vec)
@@ -190,10 +192,12 @@ class TimeSeriesTransformer(nn.Module):
 
         return cpu_output, stability_output, dec_output
 
+
 class VMEncoder(nn.Module):
-    def __init__(self, id_unique, sub_unique, dep_unique, hidden_dim, n_heads = 4, n_layers = 8, dropout_rate = 0.15):
+    def __init__(self, batch_size, id_unique, sub_unique, dep_unique, hidden_dim, n_heads = 4, n_layers = 8, dropout_rate = 0.15):
         super().__init__()
         # embedding
+        self.batch_size = batch_size
         self.id_emb = nn.Embedding(id_unique, hidden_dim)
         self.sub_emb = nn.Embedding(sub_unique, hidden_dim)
         self.dep_emb = nn.Embedding(dep_unique, hidden_dim)
@@ -201,36 +205,36 @@ class VMEncoder(nn.Module):
         self.core_emb = nn.Embedding(5, hidden_dim)
         self.ram_emb = nn.Embedding(14, hidden_dim)
 
-        self.encoder_input = nn.Linear(hidden_dim, hidden_dim)
-        self.positional_encoding_enc = PositionalEncoding(hidden_dim, hidden_dim)
+        self.encoder_input = nn.Linear(hidden_dim, hidden_dim) # batch_size, hidden_dim
+        self.positional_encoding_enc = PositionalEncoding(6, hidden_dim)
 
         self.encoder_layers = nn.ModuleList([EncoderLayer(hidden_dim, n_heads, hidden_dim, dropout_rate) for _ in range(n_layers)])
 
-        self.cpu_layer = nn.ModuleList([
-                                        nn.Linear(hidden_dim, hidden_dim),
-                                        nn.Dropout(0.1),
-                                        nn.Linear(hidden_dim, 4),
-                                        ])
-        self.stability_layer = nn.ModuleList([
-                                            nn.Linear(hidden_dim, hidden_dim),
-                                            nn.Dropout(0.1),
-                                            nn.Linear(hidden_dim, 2)
-                                            ])
+        self.cpu_layer = nn.Sequential(
+                                       nn.Linear(hidden_dim*6, hidden_dim*6),
+                                       nn.Dropout(dropout_rate),
+                                       nn.Linear(hidden_dim*6, 1)
+                                       )
+        self.stability_layer = nn.Sequential(
+                                            nn.Linear(hidden_dim*6, hidden_dim*6),
+                                            nn.Dropout(dropout_rate),
+                                            nn.Linear(hidden_dim*6, 2)
+                                            )
         self.dropout = nn.Dropout(dropout_rate)
 
     def forward(self, vm_vec):
-        assert len(vm_vec) == 6
-        vm_id, sub_id, dep_id, vm_cat, num_cores, ram = vm_vec
-        vm_vec = torch.cat([self.id_emb(vm_id), self.sub_emb(sub_id), self.dep_emb(dep_id),
-                            vm_cat, num_cores, ram], dim = 0)
-        
+        assert vm_vec.shape[-1] == 6, len(vm_vec)
+        # import ipdb; ipdb.set_trace()
+
+        vm_vec = torch.stack([self.id_emb(vm_vec[:, 0]), self.sub_emb(vm_vec[:, 1]), self.dep_emb(vm_vec[:, 2]),
+                              self.cat_emb(vm_vec[:, 3]), self.core_emb(vm_vec[:, 4]), self.ram_emb(vm_vec[:, 5])], dim = 1)
         enc_vec = self.dropout(self.positional_encoding_enc(self.encoder_input(vm_vec)))
     
         for enc_layer in self.encoder_layers:
             enc_vec = enc_layer(enc_vec)
-        
-        cpu_output = self.cpu_layer(enc_vec)
-        stability_output = self.stability_layer(enc_vec)
+
+        cpu_output = self.cpu_layer(enc_vec.view(self.batch_size, -1))
+        stability_output = self.stability_layer(enc_vec.view(self.batch_size, -1))
 
         return cpu_output, stability_output
     
@@ -244,15 +248,16 @@ class ForecastDecoder(nn.Module):
 
         self.decoder_layers = nn.ModuleList([DecoderLayer(hidden_dim, n_heads, hidden_dim, dropout_rate) for _ in range(n_layers)])
         
-        self.forecast_layer = nn.ModuleList([
+        self.forecast_layer = nn.Sequential(
                                             nn.Linear(hidden_dim, hidden_dim),
-                                            nn.Dropout(0.1),
+                                            nn.Dropout(dropout_rate),
                                             nn.Linear(hidden_dim, 1)
-                                            ])
+                                            )
         self.dropout = nn.Dropout(dropout_rate)
 
     def forward(self, cpu_vec, enc_vec = None):
-        dec_vec = self.dropout(self.positional_encoding_dec(self.decoder_input(cpu_vec)))
+        # import ipdb; ipdb.set_trace()
+        dec_vec = self.dropout(self.positional_encoding_dec(self.decoder_input(cpu_vec.type(torch.float32))))
         enc_vec = dec_vec.clone() if enc_vec is None else enc_vec
         
         for dec_layer in self.decoder_layers:

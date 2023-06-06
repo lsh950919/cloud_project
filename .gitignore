@@ -1,2 +1,4 @@
 data/*
 upload.py
+checkpoints/*
+__pycache__

@@ -5,7 +5,6 @@ from torch.utils.data import Dataset
 import pandas as pd
 from glob import glob
 from natsort import natsorted
-from sklearn.preprocessing import MinMaxScaler
 import ipdb
 import numpy as np
 from tqdm import tqdm
@@ -13,15 +12,14 @@ from tqdm import tqdm
 random.seed(42)
 VM_COLUMNS = [content.split(',')[2] for content in open('data/schema.csv').readlines() if content.startswith('vmtable')]
 CPU_COLUMNS = [content.split(',')[2] for content in open('data/schema.csv').readlines() if content.startswith('vm_cpu_readings')]
-scaler = MinMaxScaler((0.1, 1))
 
 class TimeSeriesDataset(Dataset):
-    def __init__(self, input_window_size, output_window_size, type = 'train', stride = 6, file_count:int = 1, hours:int = 6, scale = False):
+    def __init__(self, input_window_size, output_window_size, scaler, mode = 'train', stride = 6, file_count:int = 1, hours:int = 6, scale = False):
         '''
         Args:
             input_window_size (int): number of cpu readings to be used for forecasting
             output_window_size (int): length of forecasting output
-            type (str, optional): train, val, or test (default: train)
+            mode (str, optional): train, val, or test (default: train)
             stride (int, optional): number of strides in time for each prediction step (default: 10)
             file_count (int, optional): number of cpu files to be used (default: 1)
             hours (int, optional): minimum number of hours vm was used (default: 6)
@@ -31,18 +29,18 @@ class TimeSeriesDataset(Dataset):
         self.stride = stride
         
         print('Processing VM table...')
-        self.vm_table = pd.read_csv('data/vmtable.csv')
-        self.vm_table.columns = VM_COLUMNS
-        self.cpu_paths = natsorted(glob('/scratch/lhk/cpu_readings/*125.csv'))[:file_count]
-        print(self.cpu_paths)
-        print(len(self.cpu_paths))
+        self.vm_table = pd.read_csv('data/vmtable_cpu.csv')
+        # self.vm_table.columns = VM_COLUMNS
+        self.cpu_paths = natsorted(glob(f'/scratch/lhk/cpu_readings/{mode}/*125-{mode}.csv'))[:file_count]
+        # ipdb.set_trace()
         assert len(self.cpu_paths) == file_count
 
         # Encoder Input
         # TODO: come up with a way to filter out vm ids if they are only created relatively recently compared to the last timestamp
         self.vm_table = self.vm_table[(((self.vm_table['timestamp vm deleted'] - self.vm_table['timestamp vm created']) / 300) >= 60*hours)]
+        # self.avg_cpu_label = self.vm_table[['vm id', 'avg_cpu_label']]
+        self.avg_cpu_label = self.vm_table[['vm id', 'avg cpu']]
         self.vm_table = self.vm_table[['vm id', 'subscription id', 'deployment id', 'vm category', 'vm virtual core count', 'vm memory (gb)']]
-
         # filter out vm table using the last timestamp of last file
         self.valid_ids = self.vm_table['vm id'].tolist()
 
@@ -56,7 +54,8 @@ class TimeSeriesDataset(Dataset):
         self.vm_table['subscription id'] = self.vm_table['subscription id'].map(self.sub_ind)
         self.vm_table['deployment id'] = self.vm_table['deployment id'].map(self.dep_ind)
         self.vm_table['vm category'] = self.vm_table['vm category'].map(self.cat_ind)
-
+        self.avg_cpu_label['vm id'] = self.avg_cpu_label['vm id'].map(self.vm_ind)
+        
         # scale cores and ram
         if scale:
             self.vm_table['vm virtual core count'] = scaler.fit_transform(self.vm_table[['vm virtual core count']])
@@ -71,7 +70,9 @@ class TimeSeriesDataset(Dataset):
         # concatenate all cpu readings files, sort by vm id first then timestamp
         print('Processing CPU reading files...')
         cpu_concat = pd.concat([self.filter_reading(path, self.valid_ids) for path in tqdm(self.cpu_paths)], axis = 0)#.sort_values(['vm id', 'timestamp']) # maybe find a faster way to sort
+        cpu_concat['avg cpu'] = scaler.fit_transform(cpu_concat[['avg cpu']])
         cpu_by_time = cpu_concat.pivot_table(index = 'vm id', columns = 'timestamp', values = 'avg cpu').fillna(0)
+        # import ipdb; ipdb.set_trace()
         self.cpu_by_time = cpu_by_time[[columns for columns in cpu_by_time.columns if columns % 300 == 0]]
     
         cpu_array = np.apply_along_axis(self.window, 1, self.cpu_by_time.to_numpy())
@@ -79,6 +80,7 @@ class TimeSeriesDataset(Dataset):
         self.cpu_data = {vm_index: cpu_array[i] for i, vm_index in enumerate(cpu_by_time.index)}
         self.cpu_label = {vm_index: cpu_label[i] for i, vm_index in enumerate(cpu_by_time.index)}
         self.vm_table = self.vm_table[self.vm_table['vm id'].isin(self.cpu_data.keys())].reset_index(drop = True)
+        self.avg_cpu_label = self.avg_cpu_label[self.avg_cpu_label['vm id'].isin(self.cpu_data.keys())].reset_index(drop = True)
 
     def window(self, ary, label = False):
         ary_cut = ary[:-((ary.shape[0] - self.stride) % self.input_window_size)]
@@ -106,7 +108,15 @@ class TimeSeriesDataset(Dataset):
     def __getitem__(self, index):
         # vm ind, sub ind, dep ind
         vm_id = self.vm_table.loc[index, 'vm id']
+        '''
+        Return:
+        VM info (6)
+        AVG CPU label (1)
+        CPU window (num_windows, window_size) with stride
+        CPU label (1)
+        '''
         return torch.from_numpy(self.vm_table.loc[index].to_numpy()), \
+               torch.from_numpy(np.asarray(self.avg_cpu_label.loc[index, 'avg cpu'])), \
                torch.from_numpy(self.cpu_data[vm_id]), \
                torch.from_numpy(self.cpu_label[vm_id])
         

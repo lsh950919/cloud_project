@@ -153,14 +153,14 @@ class TimeSeriesTransformer(nn.Module):
         self.decoder_layers = nn.ModuleList([DecoderLayer(hidden_dim, n_heads, hidden_dim, dropout_rate) for _ in range(n_layers)])
 
         self.cpu_layer = nn.Sequential(
-                                    nn.Linear(hidden_dim, hidden_dim),
-                                    nn.Dropout(dropout_rate),
-                                    nn.Linear(hidden_dim, 4),
-                                    )
+                                       nn.Linear(hidden_dim*6, hidden_dim*6),
+                                       nn.Dropout(dropout_rate),
+                                       nn.Linear(hidden_dim*6, 4)
+                                       )
         self.stability_layer = nn.Sequential(
-                                            nn.Linear(hidden_dim, hidden_dim),
+                                            nn.Linear(hidden_dim*6, hidden_dim*6),
                                             nn.Dropout(dropout_rate),
-                                            nn.Linear(hidden_dim, 2)
+                                            nn.Linear(hidden_dim*6, 2)
                                             )
         self.forecast_layer = nn.Sequential(
                                             nn.Linear(hidden_dim, hidden_dim),
@@ -171,19 +171,19 @@ class TimeSeriesTransformer(nn.Module):
 
     def forward(self, vm_vec, cpu_vec):
         assert vm_vec.shape[-1] == 6, len(vm_vec)
-        import ipdb; ipdb.set_trace()
+        # import ipdb; ipdb.set_trace()
 
         vm_vec = torch.stack([self.id_emb(vm_vec[:, 0]), self.sub_emb(vm_vec[:, 1]), self.dep_emb(vm_vec[:, 2]),
                               self.cat_emb(vm_vec[:, 3]), self.core_emb(vm_vec[:, 4]), self.ram_emb(vm_vec[:, 5])], dim = 1)
         enc_vec = self.dropout(self.positional_encoding_enc(self.encoder_input(vm_vec)))
-        
-        dec_vec = self.dropout(self.positional_encoding_dec(self.decoder_input(cpu_vec.type(torch.float32))))
     
         for enc_layer in self.encoder_layers:
             enc_vec = enc_layer(enc_vec)
+
+        cpu_output = self.cpu_layer(enc_vec.view(self.batch_size, -1))
+        stability_output = self.stability_layer(enc_vec.view(self.batch_size, -1))
         
-        cpu_output = self.cpu_layer(enc_vec)
-        stability_output = self.stability_layer(enc_vec)
+        dec_vec = self.dropout(self.positional_encoding_dec(self.decoder_input(cpu_vec.type(torch.float32))))
         
         for dec_layer in self.decoder_layers:
             dec_vec = dec_layer(dec_vec, enc_vec)
@@ -213,7 +213,7 @@ class VMEncoder(nn.Module):
         self.cpu_layer = nn.Sequential(
                                        nn.Linear(hidden_dim*6, hidden_dim*6),
                                        nn.Dropout(dropout_rate),
-                                       nn.Linear(hidden_dim*6, 1)
+                                       nn.Linear(hidden_dim*6, 4)
                                        )
         self.stability_layer = nn.Sequential(
                                             nn.Linear(hidden_dim*6, hidden_dim*6),
@@ -240,9 +240,10 @@ class VMEncoder(nn.Module):
     
 
 class ForecastDecoder(nn.Module):
-    def __init__(self, dec_input, hidden_dim, input_len = 12, n_heads = 4, n_layers = 8, dropout_rate = 0.15):
+    def __init__(self, batch_size, dec_input, hidden_dim, input_len = 12, n_heads = 4, n_layers = 8, dropout_rate = 0.15):
         super().__init__()
         # embedding
+        self.batch_size = batch_size
         self.decoder_input = nn.Linear(dec_input, hidden_dim)
         self.positional_encoding_dec = PositionalEncoding(dec_input, hidden_dim)
 

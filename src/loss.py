@@ -20,7 +20,7 @@ class FocalLoss(nn.Module):
 
     def __init__(self,
                  alpha: Optional[Tensor] = None,
-                 gamma: float = 0.,
+                 gamma: float = 2,
                  reduction: str = 'mean',
                  ignore_index: int = -100):
         """Constructor.
@@ -44,7 +44,7 @@ class FocalLoss(nn.Module):
         self.reduction = reduction
 
         self.nll_loss = nn.NLLLoss(
-            weight=alpha, reduction='none', ignore_index=ignore_index)
+            weight=alpha.to('cuda'), reduction='none')
 
     def __repr__(self):
         arg_keys = ['alpha', 'gamma', 'ignore_index', 'reduction']
@@ -60,18 +60,18 @@ class FocalLoss(nn.Module):
             x = x.permute(0, *range(2, x.ndim), 1).reshape(-1, c)
             # (N, d1, d2, ..., dK) --> (N * d1 * ... * dK,)
             y = y.view(-1)
-
-        unignored_mask = y != self.ignore_index
-        y = y[unignored_mask]
+        y = y.type(torch.int64)
+        # unignored_mask = y != self.ignore_index
+        # y = y[unignored_mask]
         
-        if len(y) == 0:
-            return torch.tensor(0.)
-        x = x[unignored_mask]
+        # if len(y) == 0:
+        #     return torch.tensor(0.)
+        # x = x[unignored_mask]
 
         # compute weighted cross entropy term: -alpha * log(pt)
         # (alpha is already part of self.nll_loss)
         log_p = F.log_softmax(x, dim=-1)
-        ce = self.nll_loss(log_p, y)
+        ce = self.nll_loss(log_p, y.type(torch.int64))
 
         # get true class column from each row
         all_rows = torch.arange(len(x))
